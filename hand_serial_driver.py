@@ -38,10 +38,10 @@ class HandSerialDriver(Node):
             exit(1)
             
         # 3. Publisher: 마스터 핸드 데이터 -> 로봇 제어 명령
-        self.publisher_ = self.create_publisher(JointState, 'goal_joint_states', 10)
+        self.publisher_ = self.create_publisher(JointState, 'dex_mouse/goal_joint_states', 10)
         
         # 4. Subscriber: 로봇 실제 상태 -> 마스터 핸드 피드백 (추가됨)
-        self.create_subscription(JointState, 'joint_states', self.feedback_callback, 10)
+        self.create_subscription(JointState, 'bluehand/joint_states', self.feedback_callback, 10)
         
         # 5. 수신 타이머
         self.create_timer(0.001, self.read_serial_callback)
@@ -61,7 +61,7 @@ class HandSerialDriver(Node):
         }
 
         # 반대로 작동하는 센서 인덱스 리스트
-        self.REVERSE_LIST = [2, 3, 4]
+        self.REVERSE_LIST = [2, 3, 4, 5]
 
     def read_serial_callback(self):
         if self.ser.in_waiting > 0:
@@ -192,26 +192,29 @@ class HandSerialDriver(Node):
         msg.header.stamp = self.get_clock().now().to_msg()
         
         msg.name = [
-            'finger1_AA', 'finger1_FE', 
-            'finger2_AA', 'finger2_FE', 
-            'finger3_AA', 'finger3_FE', 
-            'finger4_AA', 'finger4_FE'
+            'finger1_AA', 'finger1_FE',
+            'finger2_AA', 'finger2_FE',
+            'finger3_AA', 'finger3_FE',
+            'finger4_AA', 'finger4_FE',
+            'finger5_AA', 'finger5_FE'
         ]
-        
+
         # 1. 엄지
         val_1_aa = self.normalize_aa_value(raw_joints[0], 0)
         val_1_fe = self.normalize_value(raw_joints[1], 1)
-        
-        # 2~4. 나머지 손가락
+
+        # 2~5. 나머지 손가락
         val_2_fe = self.normalize_value(raw_joints[2], 2)
         val_3_fe = self.normalize_value(raw_joints[3], 3)
         val_4_fe = self.normalize_value(raw_joints[4], 4)
-        
+        val_5_fe = self.normalize_value(raw_joints[5], 5)
+
         msg.position = [
             float(val_1_aa), float(val_1_fe),
             0.0,             float(val_2_fe),
             0.0,             float(val_3_fe),
-            0.0,             float(val_4_fe)
+            0.0,             float(val_4_fe),
+            0.0,             float(val_5_fe)
         ]
         
         self.publisher_.publish(msg)
