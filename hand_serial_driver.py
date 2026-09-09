@@ -41,7 +41,8 @@ class HandSerialDriver(Node):
         self.publisher_ = self.create_publisher(JointState, 'dex_mouse/goal_joint_states', 10)
         
         # 4. Subscriber: 로봇 실제 상태 -> 마스터 핸드 피드백 (추가됨)
-        self.create_subscription(JointState, 'bluehand/joint_states', self.feedback_callback, 10)
+        self.create_subscription(
+            JointState, '/br_hand/joint_states', self.feedback_callback, 10)
         
         # 5. 수신 타이머
         self.create_timer(0.001, self.read_serial_callback)
