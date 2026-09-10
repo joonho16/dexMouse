@@ -4,7 +4,12 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 import serial
+import json
+from pathlib import Path
+import select
 import struct
+import sys
+import tempfile
 import time
 
 # --- [Protocol] STM32 통신 패킷 설정 ---
@@ -64,7 +69,89 @@ class HandSerialDriver(Node):
         # 반대로 작동하는 센서 인덱스 리스트
         self.REVERSE_LIST = [2, 3, 4, 5]
 
+        # 펴짐 기준만 PC에 저장한다. 접힘 기준/엄지 AA/펌웨어 offset은 유지.
+        self.calibration_path = Path(__file__).resolve().with_name('hand_open_calibration.json')
+        self.calibration_requested_at = None
+        self.load_open_calibration()
+        self.keyboard_timer = None
+        if sys.stdin.isatty():
+            self.keyboard_timer = self.create_timer(0.05, self.read_keyboard_callback)
+            self.get_logger().info('Open all fingers, then type c + Enter to calibrate the open position.')
+        else:
+            self.get_logger().info('Open calibration key requires running this driver in a terminal (c + Enter).')
+
+    def ranges_with_open_positions(self, positions):
+        if not isinstance(positions, dict) or set(positions) != {str(i) for i in range(1, 6)}:
+            raise ValueError('expected open positions for finger sensors 1 through 5')
+        ranges = {idx: list(bounds) for idx, bounds in self.SENSOR_RANGES.items()}
+        for idx in range(1, 6):
+            value = positions[str(idx)]
+            if type(value) is not int or not 0 <= value <= 4095:
+                raise ValueError(f'invalid open position for sensor {idx}: {value!r}')
+            # Reverse fingers open at the upper endpoint; thumb FE opens at the lower one.
+            open_end = 1 if idx in self.REVERSE_LIST else 0
+            ranges[idx][open_end] = value
+            if ranges[idx][0] >= ranges[idx][1]:
+                raise ValueError(f'sensor {idx}: open position crosses the unchanged closed endpoint')
+        return ranges
+
+    def load_open_calibration(self):
+        try:
+            positions = json.loads(self.calibration_path.read_text(encoding='utf-8'))
+            ranges = self.ranges_with_open_positions(positions)
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError) as exc:
+            self.get_logger().warn(f'Ignoring invalid open calibration; keeping defaults: {exc}')
+            return
+        self.SENSOR_RANGES = ranges
+        self.get_logger().info(f'Loaded open calibration: {positions}')
+
+    def calibrate_open_hand(self, raw_joints):
+        positions = {str(idx): int(raw_joints[idx]) for idx in range(1, 6)}
+        temporary_path = None
+        try:
+            ranges = self.ranges_with_open_positions(positions)
+            # Replace atomically so a failed save never leaves a partial calibration file.
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8',
+                                             dir=self.calibration_path.parent,
+                                             prefix='.hand_open_calibration.',
+                                             suffix='.tmp', delete=False) as output:
+                temporary_path = Path(output.name)
+                json.dump(positions, output, indent=2)
+                output.write('\n')
+            temporary_path.replace(self.calibration_path)
+        except (OSError, ValueError) as exc:
+            self.get_logger().warn(f'Open calibration not applied: {exc}')
+            return
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError as exc:
+                    self.get_logger().warn(f'Could not remove calibration temporary file: {exc}')
+        self.SENSOR_RANGES = ranges
+        self.get_logger().info(f'Open calibration saved: {positions} ({self.calibration_path})')
+
+    def read_keyboard_callback(self):
+        try:
+            if not select.select([sys.stdin], [], [], 0)[0]:
+                return
+            command = sys.stdin.readline()
+        except (OSError, ValueError):
+            self.keyboard_timer.cancel()
+            return
+        if not command:  # EOF: stop checking a closed terminal.
+            self.keyboard_timer.cancel()
+        elif command.strip().lower() == 'c':
+            self.calibration_requested_at = time.monotonic()
+            self.get_logger().info('Capturing open position from the next valid sensor packet...')
+
     def read_serial_callback(self):
+        if (self.calibration_requested_at is not None and
+                time.monotonic() - self.calibration_requested_at > 1.0):
+            self.calibration_requested_at = None
+            self.get_logger().warn('Open calibration cancelled: no valid sensor packet within 1 second.')
         if self.ser.in_waiting > 0:
             self.buffer += self.ser.read(self.ser.in_waiting)
             
@@ -91,6 +178,9 @@ class HandSerialDriver(Node):
             checksum_calc = sum(payload) & 0xFF
             
             if checksum_recv == checksum_calc:
+                if self.calibration_requested_at is not None:
+                    self.calibration_requested_at = None
+                    self.calibrate_open_hand(raw_joints)
                 # 1. ROS로 명령 발행
                 self.publish_goal_joint_state(raw_joints)
                 
